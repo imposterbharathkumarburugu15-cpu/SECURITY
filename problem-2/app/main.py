@@ -26,15 +26,37 @@ class ScammerInput(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"status": "active", "service": "Agentic Honey-Pot"}
+    return {
+        "status": "active", 
+        "service": "Agentic Honey-Pot",
+        "endpoints": {
+            "analyze": "/analyze (POST)",
+            "health": "/ (GET)"
+        },
+        "api_key_required": True
+    }
 
 @app.post("/analyze", response_model=HoneyPotResponse)
 def analyze_interaction(input_data: ScammerInput, api_key: str = Security(verify_api_key)):
     """
     Analyzes the incoming message, detects if it's a scam, extracting intelligence,
     and generates a persona-based response.
+    
+    Required fields:
+    - session_id: Unique identifier for the session
+    - message: The message to analyze
+    
+    Required headers:
+    - x-api-key: API key for authentication
     """
     try:
+        # Validate input
+        if not input_data.session_id or not input_data.message:
+            raise HTTPException(
+                status_code=400, 
+                detail="Both 'session_id' and 'message' fields are required"
+            )
+        
         is_scam = agent.detect_scam(input_data.message)
         intelligence = agent.extract_intelligence(input_data.message)
         response_text = agent.generate_response(input_data.message, is_scam, input_data.session_id)
@@ -46,8 +68,10 @@ def analyze_interaction(input_data: ScammerInput, api_key: str = Security(verify
             intelligence=intelligence,
             status="engaged" if is_scam else "ignored"
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
