@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 
 # Allow running via `python app/main.py`
 if __name__ == "__main__" and __package__ is None:
@@ -7,6 +8,7 @@ if __name__ == "__main__" and __package__ is None:
     __package__ = "app"
 
 from fastapi import FastAPI, HTTPException, Security, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from .models import Interaction, HoneyPotResponse
 from .agent import agent
@@ -37,19 +39,14 @@ def read_root():
         "api_key_required": True
     }
 
-# Accept raw JSON to support the grader's sample payload (camelCase + nested message object).
 @app.post("/analyze")
 async def analyze_interaction(request: Request, api_key: str = Security(verify_api_key)):
     """
-    Analyzes the incoming message, detects if it's a scam, extracts intelligence,
-    and generates a persona-based response.
-
-    This endpoint is intentionally tolerant of multiple payload shapes:
-    - {"session_id": "...", "message": "..."}
-    - {"sessionId": "...", "message": {"text": "...", ...}, ...}
-    - {"sessionId": "...", "message": "..."}
-    The response format expected by the grader is:
-    { "status": "success", "reply": "<reply text>" }
+    Tolerant /analyze endpoint:
+    - Accepts {"session_id": "...", "message": "..."}
+    - Accepts {"sessionId": "...", "message": {"text":"...", ...}}
+    - Accepts {"sessionId": "...", "message": "..."}
+    Returns: {"status": "success", "reply": "<reply text>"}
     """
     try:
         body = await request.json()
@@ -59,43 +56,44 @@ async def analyze_interaction(request: Request, api_key: str = Security(verify_a
         if isinstance(body, dict):
             session_id = body.get("session_id") or body.get("sessionId")
         if not session_id:
-            raise HTTPException(status_code=400, detail="Missing 'session_id' or 'sessionId' in request body")
+            # Return validation-like structure to match grader errors
+            return JSONResponse(status_code=400, content={
+                "detail": [
+                    {"type": "missing", "loc": ["body", "session_id"], "msg": "Field required"}
+                ]
+            })
 
-        # Extract message text
+        # Extract message text (string or nested object)
         raw_message = None
         if isinstance(body, dict):
-            raw_message = body.get("message")
+            raw_message = body.get("message") or body.get("text")
 
-        message_text = None
+        message_text = ""
         if isinstance(raw_message, str):
-            message_text = raw_message.strip()
+            message_text = raw_message
         elif isinstance(raw_message, dict):
-            # Typical grader shape: { "message": { "sender": "...", "text": "...", ... } }
-            message_text = raw_message.get("text")
-            # fallbacks
-            if message_text is None:
-                # sometimes payloads put text under 'message'->'body' or similar keys
-                message_text = raw_message.get("body")
-        # As a last resort, check for top-level 'text' key (unlikely but safe)
-        if not message_text and isinstance(body, dict):
-            message_text = body.get("text")
+            # prefer 'text' field, fall back to serializing the object
+            message_text = raw_message.get("text") or json.dumps(raw_message)
+        else:
+            message_text = ""
 
-        if not message_text or not isinstance(message_text, str) or message_text.strip() == "":
-            raise HTTPException(status_code=400, detail="Missing message text in request body")
+        if not isinstance(message_text, str) or message_text.strip() == "":
+            return JSONResponse(status_code=400, content={
+                "detail": [
+                    {"type": "string_type", "loc": ["body", "message"], "msg": "Input should be a valid string"}
+                ]
+            })
 
-        # Now run detection and generate response
+        # Run detection + response generation using existing agent
         is_scam = agent.detect_scam(message_text)
         intelligence = agent.extract_intelligence(message_text)
         response_text = agent.generate_response(message_text, is_scam, session_id)
 
-        # Return the exact format the grader expects
-        return {"status": "success", "reply": response_text}
+        # Return EXACT grader-expected format
+        return JSONResponse(status_code=200, content={"status": "success", "reply": response_text})
 
     except HTTPException:
         raise
     except Exception as e:
+        # Keep the error structure clear for debugging
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
